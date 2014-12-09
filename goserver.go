@@ -2,22 +2,25 @@ package goserver
 
 import (
     "fmt"
+    "io"
     "net"
 )
 
-type A interface {
-    OnConnected(conn *net.TCPConn)
-    OnDataRecved(conn *net.TCPConn, data []byte)
-    OnClosed(conn *net.TCPConn)
+type Callback interface {
+    OnConnected(conn io.WriteCloser, addr string)
+    OnDataRecved(conn io.WriteCloser, data []byte)
+    OnClosed(conn io.WriteCloser)
 }
 
 type Server struct {
     listener *net.TCPListener
     quit     chan struct{}
+    callback Callback
+    map[net.TCPConn]
 }
 
-func (s *Server) f() {
-
+func (s *Server) RegCallback(cb Callback) {
+    s.callback = cb
 }
 
 func (s *Server) Start(port int) error {
