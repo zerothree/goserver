@@ -4,6 +4,7 @@ import (
     "fmt"
     "io"
     "net"
+    "sync"
 )
 
 type Callback interface {
@@ -16,7 +17,9 @@ type Server struct {
     listener *net.TCPListener
     quit     chan struct{}
     callback Callback
-    map[net.TCPConn]
+    sessions map[*session]struct{}
+    mutex    sync.Mutex
+    group    sync.WaitGroup
 }
 
 func (s *Server) RegCallback(cb Callback) {
@@ -41,6 +44,14 @@ func (s *Server) Stop() {
     s.listener.Close()
     s.quit <- struct{}{}
     <-s.quit
+
+    s.mutex.Lock()
+    for sess, _ := range s.sessions {
+        sess.Close()
+    }
+    s.mutex.Unlock()
+    //wwait all conns routine quit
+    s.group.Wait()
 }
 
 func (s *Server) acceptSessions() {
@@ -56,7 +67,24 @@ func (s *Server) acceptSessions() {
             continue
         }
 
-        session := &Session{conn}
-        session.Start()
+        sess := &session{conn}
+        s.addSession(sess)
+        sess.open()
     }
+}
+
+func (s *Server) addSession(sess *session) {
+    s.mutex.Lock()
+    s.sessions[sess] = struct{}{}
+    s.mutex.Unlock()
+
+    s.group.Add(1)
+}
+
+func (s *Server) removeSession(sess *session) {
+    s.mutex.Lock()
+    delete(s.sessions, sess)
+    s.mutex.Unlock()
+
+    s.group.Done()
 }
