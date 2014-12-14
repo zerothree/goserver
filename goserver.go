@@ -7,19 +7,22 @@ import (
     "sync"
 )
 
+// callback
+//
+// All methods must be safe for concurrent use by multiple goroutines
 type Callback interface {
-    OnConnected(conn io.WriteCloser, addr string)
+    OnConnected(conn io.Writer, addr string)
 
     // It returns the length of request body and any error encountered. server will close connection if error is not nil.
-    OnRequestHeaderDataRecved(conn io.WriteCloser, data []byte) (int, error)
+    OnRequestHeaderDataRecved(conn io.Writer, data []byte) (int, error)
 
     //
     // It return any error encountered. if must return a non-nil error if parsing data to request body is failed.
     // server will close connection if error is not nil.
     //
     // Implementations must not retain data.
-    OnRequestBodyDataRecved(conn io.WriteCloser, data []byte) error
-    OnClosed(conn io.WriteCloser)
+    OnRequestBodyDataRecved(conn io.Writer, data []byte) error
+    OnClosed(conn io.Writer)
 }
 
 type Server struct {
@@ -66,7 +69,7 @@ func (s *Server) Stop() {
     //close all sessions and wait them quit
     s.mutex.Lock()
     for sess, _ := range s.sessions {
-        sess.Close()
+        sess.close()
     }
     s.mutex.Unlock()
     s.group.Wait()

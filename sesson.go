@@ -1,6 +1,8 @@
 package goserver
 
 import (
+    "bufio"
+    "errors"
     "io"
     "net"
 )
@@ -20,7 +22,7 @@ func (s *session) open() {
 func (s *session) recv() {
     defer func() {
         s.server.removeSession(s)
-        s.Close()
+        s.close()
         if e := recover(); e != nil {
         }
     }()
@@ -28,15 +30,34 @@ func (s *session) recv() {
     s.server.callback.OnConnected(s, s.conn.RemoteAddr().String())
     defer s.server.callback.OnClosed(s)
 
-    b := bufferFree.Get()
-    defer bufferFree.Put(b)
+    bufconn := bufio.NewReader(s.conn)
+    headerBuf := make([]byte, s.server.requestHeaderLength, s.server.requestHeaderLength)
+
+    buffLen := 1024
+    buff := make([]byte, buffLen)
+
+    var err error
+    var bodyLength int
     for {
-        n, err := s.conn.Read(b)
-        if n == 0 || err != nil {
+        if _, err = io.ReadFull(bufconn, buff[:s.server.requestHeaderLength]); err != nil {
             break
         }
 
-        s.server.callback.OnDataRecved(s, b[:n])
+        if bodyLength, err = s.server.callback.OnRequestHeaderDataRecved(s, buff[:s.server.requestHeaderLength]); err != nil {
+            break
+        }
+
+        bodyBuff = buff
+        if bodyLength > buffLen {
+            bodyBuff = make([]byte, bodyLength)
+        }
+        if _, err = io.ReadFull(bufconn, bodyBuff[:bodyLength]); err != nil {
+            break
+        }
+
+        if err = s.server.callback.OnRequestBodyDataRecved(s, bodyBuff[:bodyLength]); err != nil {
+            break
+        }
     }
 }
 
@@ -44,23 +65,26 @@ func (s *session) send() {
     for _, p := range s.outgoing {
         _, err := s.conn.Write(p)
         if err != nil {
-            s.Close()
+            s.close()
             break
         }
     }
 }
 
 // close connection
-func (s *session) Close() error {
-    return s.conn.Close()
+func (s *session) close() error {
+    return s.conn.close()
 }
 
 // write data to connection
 func (s *session) Write(p []byte) (n int, err error) {
+    buff := make([]byte, len(p))
+    copy(buff, p)
+
     select {
-    case outgoing <- p:
+    case s.outgoing <- buff:
         return len(p), nil
     default:
-        return 0, io.ErrShortWrite
+        return 0, errors.New("write channel is full")
     }
 }
