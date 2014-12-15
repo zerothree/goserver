@@ -23,6 +23,8 @@ func (s *session) recv() {
     defer func() {
         s.server.removeSession(s)
         s.close()
+        close(s.outgoing)
+
         if e := recover(); e != nil {
         }
     }()
@@ -76,8 +78,13 @@ func (s *session) close() error {
     return s.conn.close()
 }
 
-// write data to connection
+// write data to outgoing channel
+// write data to a closed outgoing will return error. write data to a buffer-fulled outgoing will return error too.
 func (s *session) Write(p []byte) (n int, err error) {
+    defer func() {
+        err = recover()
+    }()
+
     buff := make([]byte, len(p))
     copy(buff, p)
 
