@@ -5,6 +5,7 @@ import (
     "errors"
     "io"
     "net"
+    "runtime"
 )
 
 type session struct {
@@ -33,7 +34,6 @@ func (s *session) recv() {
     defer s.server.callback.OnClosed(s)
 
     bufconn := bufio.NewReader(s.conn)
-    headerBuf := make([]byte, s.server.requestHeaderLength, s.server.requestHeaderLength)
 
     buffLen := 1024
     buff := make([]byte, buffLen)
@@ -49,7 +49,7 @@ func (s *session) recv() {
             break
         }
 
-        bodyBuff = buff
+        bodyBuff := buff
         if bodyLength > buffLen {
             bodyBuff = make([]byte, bodyLength)
         }
@@ -64,7 +64,7 @@ func (s *session) recv() {
 }
 
 func (s *session) send() {
-    for _, p := range s.outgoing {
+    for p := range s.outgoing {
         _, err := s.conn.Write(p)
         if err != nil {
             s.close()
@@ -75,14 +75,16 @@ func (s *session) send() {
 
 // close connection
 func (s *session) close() error {
-    return s.conn.close()
+    return s.conn.Close()
 }
 
 // write data to outgoing channel
 // write data to a closed outgoing will return error. write data to a buffer-fulled outgoing will return error too.
 func (s *session) Write(p []byte) (n int, err error) {
     defer func() {
-        err = recover()
+        if e := recover(); e != nil {
+            err = e.(runtime.Error)
+        }
     }()
 
     buff := make([]byte, len(p))

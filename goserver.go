@@ -40,7 +40,7 @@ func NewServer(requestHeaderLength int, cb Callback) *Server {
     s.requestHeaderLength = requestHeaderLength
     s.callback = cb
 
-    s.quit = make(chan []struct{})
+    s.quit = make(chan struct{})
     s.sessions = make(map[*session]struct{})
 
     return s
