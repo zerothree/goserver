@@ -5,27 +5,48 @@ import (
     "io"
     "net"
     "sync"
+    "time"
 )
 
-// callback
+// Objects implementing the Handler interface can be registered to handle client's request.
 //
-// All methods must be safe for concurrent use by multiple goroutines
-type Callback interface {
-    OnConnected(conn io.Writer, addr string)
+// OnConnected() and OnClosed() are called once per successful connection.
+// All other callbacks will be called between those two methods, which allows for easier resource management in your handler implementation.
+// All callbacks per connection are called in the same goroutine. But different connection's callbacks may be called in different goroutines.
+//
+// Conn's Write method is async and returned immediatly. It write data to an outqueue.
+// if the outqueue is full, Write will return error, and the connection will be closed.
+type Handler interface {
+    // Called when a connection is made.
+    // The session argument represents the connection. You are responsible for storing it somewhere if you need to.
+    OnConnected(session io.Writer, addr string)
 
-    // It returns the length of request body and any error encountered. server will close connection if error is not nil.
-    OnRequestHeaderDataRecved(conn io.Writer, data []byte) (int, error)
-
-    //
-    // It return any error encountered. if must return a non-nil error if parsing data to request body is failed.
-    // server will close connection if error is not nil.
-    //
+    // Called when header data is recved.
+    // The callback should return size of request body and any error encountered. Server will close connection if error is not nil.
     // Implementations must not retain data.
-    OnRequestBodyDataRecved(conn io.Writer, data []byte) error
-    OnClosed(conn io.Writer)
+    OnRequestHeaderDataRecved(session io.Writer, data []byte) (int, error)
+
+    // Called when body data is recved.
+    // It return any error encountered. Server will close connection if error is not nil.
+    // Implementations must not retain data.
+    OnRequestBodyDataRecved(session io.Writer, data []byte) error
+
+    // Called when the connection is losted or closed.
+    OnClosed(session io.Writer, err error)
 }
 
 type Server struct {
+    Addr         string        // TCP address to listen on
+    Handler      Handler       // handler to invoke
+    ReadTimeout  time.Duration // maximum duration before timing out read of the request
+    WriteTimeout time.Duration // maximum duration before timing out write of the response
+    OutQueueSize int           // outqueue size. if 0 defaultOutQueueSize will be used.
+    HeaderBytes  int           // size of request headers
+
+    // ErrorLog specifies an optional logger for errors accepting connections and unexpected behavior from handlers.
+    // If nil, logging goes to os.Stderr via the log package's standard logger.
+    ErrorLog *log.Logger
+
     listener            *net.TCPListener
     quit                chan struct{}
     callback            Callback
@@ -73,6 +94,42 @@ func (s *Server) Stop() {
     }
     s.mutex.Unlock()
     s.group.Wait()
+}
+
+func (s *Server) Serve(l net.Listener) error {
+    defer l.Close()
+    var tempDelay time.Duration // how long to sleep on accept failure
+    for {
+        rw, e := l.Accept()
+        if e != nil {
+            if ne, ok := e.(net.Error); ok && ne.Temporary() {
+                if tempDelay == 0 {
+                    timeDelay = 5 * time.Millisecond
+                } else {
+                    timeDelay *= 2
+                }
+                if max := 1 * time.Second; tempDelay > max {
+                    tempDelay = max
+                }
+                s.logf("Accept error: %v; retrying in %v", e, tempDelay)
+                time.Sleep(tempDelay)
+                continue
+            }
+            return e
+        }
+        tempDelay = 0
+        sess := &session{conn: conn, server: s}
+        s.addSession(sess)
+        sess.open()
+    }
+}
+
+func (s *Server) logf(format string, args ...interface{}) {
+    if s.ErrorLog != nil {
+        s.ErrorLog.Printf(format, args...)
+    } else {
+        log.Printf(format, args...)
+    }
 }
 
 func (s *Server) acceptSessions() {
