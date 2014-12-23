@@ -1,12 +1,19 @@
 package goserver
 
 import (
+    "errors"
     "fmt"
     "io"
     "net"
     "sync"
     "time"
 )
+
+// Session writes data to client and accepts IPC message.
+type Session interface {
+    io.Writer
+    IPC(msg interface{}) error
+}
 
 // Objects implementing the Handler interface can be registered to handle client's request.
 //
@@ -19,69 +26,75 @@ import (
 type Handler interface {
     // Called when a connection is made.
     // The session argument represents the connection. You are responsible for storing it somewhere if you need to.
-    OnConnected(session io.Writer, addr string)
+    OnConnected(sess Session, addr string) error
 
     // Called when header data is recved.
     // The callback should return size of request body and any error encountered. Server will close connection if error is not nil.
     // Implementations must not retain data.
-    OnRequestHeaderDataRecved(session io.Writer, data []byte) (int, error)
+    OnRequestHeaderDataRecved(sess Session, data []byte) (int, error)
 
     // Called when body data is recved.
     // It return any error encountered. Server will close connection if error is not nil.
     // Implementations must not retain data.
-    OnRequestBodyDataRecved(session io.Writer, data []byte) error
+    OnRequestBodyDataRecved(sess Session, data []byte) error
 
-    // Called when the connection is losted or closed.
-    OnClosed(session io.Writer, err error)
+    OnIPCRecved(sess Session, msg interface{}) error
+
+    // Called when the connection is losted or closed
+    OnClosed(sess Session)
 }
 
 type Server struct {
     Addr         string        // TCP address to listen on
-    Handler      Handler       // handler to invoke
+    Handler      Handler       // handler to invoke. This field must be set.
+    HeaderBytes  int           // size of request headers. This field must be set.
+    OutQueueSize int           // outqueue size. if 0 defaultOutQueueSize will be used.
+    IPCQueueSize int           // IPCQueue size. if 0 defaultIPCQueueSize will be used.
     ReadTimeout  time.Duration // maximum duration before timing out read of the request
     WriteTimeout time.Duration // maximum duration before timing out write of the response
-    OutQueueSize int           // outqueue size. if 0 defaultOutQueueSize will be used.
-    HeaderBytes  int           // size of request headers
 
     // ErrorLog specifies an optional logger for errors accepting connections and unexpected behavior from handlers.
     // If nil, logging goes to os.Stderr via the log package's standard logger.
     ErrorLog *log.Logger
 
-    listener            *net.TCPListener
-    quit                chan struct{}
-    callback            Callback
-    sessions            map[*session]struct{}
-    mutex               sync.Mutex
-    group               sync.WaitGroup
-    requestHeaderLength int
+    listener *net.Listener
+    quit     chan struct{}
+    sessions map[*session]struct{}
+    mutex    sync.Mutex
+    group    sync.WaitGroup
 }
 
-func NewServer(requestHeaderLength int, cb Callback) *Server {
-    s := &Server{}
-    s.requestHeaderLength = requestHeaderLength
-    s.callback = cb
+// ListenAndStart listens on the TCP network address s.Addr, and call s.Start to handle request on incoming connections.
+func (s *Server) ListenAndStart() error {
+    if s.Addr == "" {
+        return errors.New("not set Addr")
+    }
 
-    s.quit = make(chan struct{})
-    s.sessions = make(map[*session]struct{})
-
-    return s
-}
-
-func (s *Server) Start(port int) error {
-    tcpAddr, err := net.ResolveTCPAddr("tcp4", fmt.Sprintf(":%d", port))
+    l, err = net.Listen("tcp", s.Addr)
     if err != nil {
         return err
     }
 
-    s.listener, err = net.ListenTCP("tcp", tcpAddr)
-    if err == nil {
-        go s.acceptSessions()
-    }
-
-    return err
+    return s.Start(l)
 }
 
-// gracefully stop server
+// Start create a gotrouine to accept connections on the listener l, creating two new goroutines for each connection.
+// One goroutine is to read request, another goroutine is to call s.Handler to reply client's request, IPC's request and write response.
+func (s *Server) Start(l net.Listener) error {
+    if s.Handler == nil || s.HeaderBytes == nil {
+        return errors.New("not set Handler or HeaderBytes")
+    }
+    s.listener = l
+    s.quit = make(chan struct{})
+    s.sessions = make(map[*session]struct{})
+
+    go s.acceptSessions()
+
+    return nil
+}
+
+// Stop gracefully stop server.
+// Stop close listener and all active connections, wait for goroutins for each connection to quit.
 func (s *Server) Stop() {
     s.listener.Close()
     s.quit <- struct{}{}
@@ -96,11 +109,10 @@ func (s *Server) Stop() {
     s.group.Wait()
 }
 
-func (s *Server) Serve(l net.Listener) error {
-    defer l.Close()
+func (s *Server) acceptSessions() error {
     var tempDelay time.Duration // how long to sleep on accept failure
     for {
-        rw, e := l.Accept()
+        conn, e := s.listener.Accept()
         if e != nil {
             if ne, ok := e.(net.Error); ok && ne.Temporary() {
                 if tempDelay == 0 {
@@ -115,7 +127,9 @@ func (s *Server) Serve(l net.Listener) error {
                 time.Sleep(tempDelay)
                 continue
             }
-            return e
+            <-s.quit
+            s.quit <- struct{}{}
+            return
         }
         tempDelay = 0
         sess := &session{conn: conn, server: s}
@@ -129,25 +143,6 @@ func (s *Server) logf(format string, args ...interface{}) {
         s.ErrorLog.Printf(format, args...)
     } else {
         log.Printf(format, args...)
-    }
-}
-
-func (s *Server) acceptSessions() {
-    for {
-        conn, err := s.listener.AcceptTCP()
-        if err != nil {
-            select {
-            case <-s.quit:
-                s.quit <- struct{}{}
-                return
-            default:
-            }
-            continue
-        }
-
-        sess := &session{conn: conn, server: s}
-        s.addSession(sess)
-        sess.open()
     }
 }
 
